@@ -6,42 +6,46 @@
 
 ### 阅读前置条件
 
-掌握 PromQL 基本语法；熟悉 Container 基本常识；了解 K8s 中 Node, Namespace, 和 Pod 资源。对 PromQL 有疑问的同学请移步 PromQL 语法相关的笔记，本文不做讲解。
+掌握 PromQL 基本语法；熟悉 container 基本常识；了解 K8s 中 Node, Namespace, 和 Pod 资源。
+
+对 PromQL 有疑问的同学请移步 PromQL 语法相关的笔记，本文不做讲解。在使用任何 metrics 前强烈建议学习一下 PromQL 的技巧和最佳实践！
 
 ### 实验前置条件
 
-文中涉及的所有指标均来自 [node-exporter](https://github.com/prometheus/node_exporter), [cAdvisor](https://github.com/google/cadvisor) (内嵌在 [kubelet](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/) 里)，或 [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics)。
+文中涉及的指标来自 [node-exporter](https://github.com/prometheus/node_exporter), [cAdvisor](https://github.com/google/cadvisor) (内嵌在 [kubelet](https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/) 里)，和 [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics)。
 
-文中查询语句默认 K8s 为推行 [Kubernetes Metrics Overhaul](https://github.com/kubernetes/enhancements/issues/1206) (即 v1.14.0) 之前的版本。如有同学碰到查询失败的，可能是因为 metrics 的 labels 名称有变。例如 cAdvisor 指标中 Container name label 改版前为 `container_name`，改版后为 `container`。如果碰到，使用 `label_replace` function 修改即可（考验 PromQL 水平的时候到了！）。
+文中查询语句默认 K8s 为推行 [Kubernetes Metrics Overhaul](https://github.com/kubernetes/enhancements/issues/1206) (即 v1.14.0) 之后的版本。如有同学碰到涉及 `... ON(...) GROUP_LEFT ...` 的语句查询失败的，可能是因为 K8s 版本过老或做了 relabel 配置导致 metric labels 有变。如果碰到，可使用 [`label_replace`](https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace) function 修改。
 
 ## Container 资源
 
-K8s 中大部分 Container metrics 由 cAdvisor 提供，特点是由 `container_` 开头。
+K8s 中大部分 container metrics 由 cAdvisor 提供，特点是由 `container_` 开头；此外 kube-state-metrics 还补充了一些例如资源配额的 K8s 特有的信息，特点是由 `kube_pod_container_` 开头。
 
 ### CPU 用量
 
-Container CPU 主要关心 `container_cpu_usage_seconds_total`，即 Container CPU 用量总和。该指标的 `_total` 的后缀告诉我们它的属性是 counter，即累计值，所以使用时往往配合 `rate` 或 `irate` function 来查看实时值。常用查询方式：
+Container CPU 用量主要关心 `container_cpu_usage_seconds_total`，即 container CPU 用量。该 metrics 统计的是 CPU 从 `_total` 后缀可以看出它的属性是 counter，即累计值，所以一般配合 `rate` 或 `irate` function 使用。
+
+结合 `kube_pod_container_resource_limits_cpu_cores`，即 container CPU 配额，我们可以计算 container 的 CPU 饱和度：
 
 ```
-# 基本款，irate 加上一分钟这种较短的 range vector selector，适用于监控图
-irate(container_cpu_usage_seconds_total[1m])
-
-# 报警优化款，使用 rate 加上较大的 range vector selector；由于 CPU 数据波动剧烈，这样的
-# 写法能有效避免一个短暂的波动导致报警规则被触发/解除
-rate(container_cpu_usage_seconds_total[5m])
-
-# 注意每个 Pod 除了每个 Container 会输出一条 time series，Pod 本身也会输出一条代表 Pod
-# 总用量的 time series，特点是 container_name=""。因此有两种方法查询 Pod 总和。
-# 使用 container_name="" 查询条件
-irate(container_cpu_usage_seconds_total{container_name=""}[1m])
-# 使用 sum() function
-sum(
-	irate(container_cpu_usage_seconds_total{container_name!=""}[1m])
-) by (namespace, pod_name)
+irate(container_cpu_usage_seconds_total{
+    namespace="kube-system", pod="prometheus", container="c0"
+  }[1m]) / ON (namespace, pod, container)
+  GROUP_LEFT kube_pod_container_resource_limits_cpu_cores
 ```
 
 ### 内存用量
 
-和内存用量相关的指标有三个：
+__TL;DR__ container 内存用量主要关心 `container_memory_working_set_bytes`。但内存用量相比 CPU 复杂一些，值得更深入地了解。
 
-### 配额使用率
+首先我们有 `container_memory_rss`，对应 cgroup 中的 `rss` (resident set size)，可以通俗地理解为物理内存。其次我们有 `container_memory_usage_bytes`，对应 cgroup 中的 `usage_in_bytes`，即包括 rss 和 cache 的内存总用量。这两个都是很有价值的 metrics，可以帮助我们在分析资源用量、规划资源配置。但更多的时候，我们关系的问题是：我的 container 离 OOM kill 还有多远？
+
+Container 的内存限额，即 cgroup 中的 `limit_in_bytes`，是计算 cache 的，但我们却不能直接用 `container_memory_usage_bytes` 来判断一个 container 什么时候会 OOM - 因为当它的值达到限额时，kernel 会先尝试释放 `inactive_file`，即内存中不活跃 file cache 部分。直到无可释放之后，OOM killer 才会把程序杀掉。而 `container_memory_working_set_bytes` 就是有 `usage_in_bytes` 减去 `inactive_file` 计算得来的；当它达到 limit 时，OOM kill 会立即被执行。K8s 在计算 Avaiable Memory 的时候，使用的也是这个值。
+
+结合 `kube_pod_container_resource_limits_memory_bytes `，即 container 内存配额，我们可以计算 container 的内存饱和度：
+
+```
+container_memory_working_set_bytes{
+    namespace="kube-system",  pod="prometheus", container="c0",
+  } / ON (namespace, pod, container)
+  GROUP_LEFT kube_pod_container_resource_limits_memory_bytes
+```
