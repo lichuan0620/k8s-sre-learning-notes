@@ -52,7 +52,9 @@ irate(container_cpu_usage_seconds_total{
 
 首先我们有 `container_memory_rss`，对应 cgroup 中的 `rss` \(resident set size\)，可以通俗地理解为物理内存。其次我们有 `container_memory_usage_bytes`，对应 cgroup 中的 `usage_in_bytes`，即包括 rss 和 cache 的内存总用量。这两个都是很有价值的 metrics，可以帮助我们在分析资源用量、规划资源配置。但更多的时候，我们关系的问题是：我的 container 离 OOM kill 还有多远？
 
-Container 的内存限额，即 cgroup 中的 `limit_in_bytes`，是计算 cache 的，但我们却不能直接用 `container_memory_usage_bytes` 来判断一个 container 什么时候会 OOM - 因为当它的值达到限额时，kernel 会先尝试释放 `inactive_file`，即内存中不活跃 file cache 部分。直到无可释放之后，OOM killer 才会把程序杀掉。而 `container_memory_working_set_bytes` 就是有 `usage_in_bytes` 减去 `inactive_file` 计算得来的；当它达到 limit 时，OOM kill 会立即被执行。K8s 在计算 Avaiable Memory 的时候，使用的也是这个值。
+Container 的内存限额，即 cgroup 中的 `limit_in_bytes`，是计算 cache 的，但我们却不能直接用 `container_memory_usage_bytes` 来判断一个 container 什么时候会 OOM - 因为当它的值达到限额时，kernel 会先尝试释放 `inactive_file`，即内存中不活跃 file cache 部分。直到无可释放之后，OOM killer 才会把程序杀掉。而 `container_memory_working_set_bytes` 就是有 `usage_in_bytes` 减去 `inactive_file` 计算得来的；当它达到 limit 时，OOM kill 会立即被执行。K8s 在计算 Available Memory 的时候，使用的也是这个值。
+
+![working set vs usage bytes vs rss](../.gitbook/assets/mem-type.png)
 
 结合 `kube_pod_container_resource_limits_memory_bytes`，即 container 内存配额，我们可以计算 container 的内存饱和度：
 
