@@ -22,9 +22,13 @@
 
 <!-- doctoc --maxlevel 3 --title "# [PROM-101] 初步认识 Prometheus" prometheus/PROM-101.md -->
 
+---
+
+前置阅读：[[OBSV-101] 可观测性：概念和最佳实践](https://github.com/lichuan0620/k8s-sre-learning-notes/blob/master/prometheus/PROM-101.md)
+
 这篇笔记从零开始介绍开源监控引擎 Prometheus（普罗米修斯），从功能，基本用法，和社区地位几个维度帮读者快速理解这个项目的特性和优缺点。
 
-文档编写于 2020 年 9 月，Prometheus 当前版本为 2.21.0。
+文档基于 Prometheus 2.x 版本编写。
 
 ## Prometheus 是什么
 
